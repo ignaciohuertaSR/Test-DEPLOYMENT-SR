@@ -1,6 +1,7 @@
 name: Deployment (chrnorm/deployment-action)
 
 # Triggers: push to main (automated) and manual runs (workflow_dispatch)
+#Prueba
 on:
   push:
     branches: [ main ]
