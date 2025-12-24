@@ -1,161 +1,70 @@
-name: Deployment (chrnorm/deployment-action)
+name: Deploy to remote server
 
-# Triggers: push to main (automated) and manual runs (workflow_dispatch)
-#Prueba
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Deployment environment (overrides default)'
+        description: 'Deployment environment'
         required: false
         default: 'production'
-      issue_key:
-        description: 'Optional Jira issue key to associate (e.g. PROJ-123)'
-        required: false
-      environment_url:
-        description: 'URL for the deployed environment'
-        required: false
-        default: 'https://example.com'
       test_only:
-        description: 'If true (manual), skip real deploy logic and only create/update deployment events'
-        required: false
-        default: 'true'
-      delete_previous:
-        description: 'If true (manual), delete existing deployments before creating a new one'
+        description: 'If true, mark deployment successful without doing the actual deploy (for testing Jira integration)'
         required: false
         default: 'false'
 
-# Permissions required to create/update Deployments
 permissions:
+  contents: read
   deployments: write
 
 jobs:
   deploy:
-    name: Create test deployment for Jira
+    name: Deploy
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Print debug info
-        # Helps diagnose 'repo not found' errors during runs
-        run: |
-          echo "github.event_name=$GITHUB_EVENT_NAME"
-          echo "repository=${{ github.repository }}"
-          echo "repository_owner=${{ github.repository_owner }}"
-          echo "actor=${{ github.actor }}"
-
-      - name: Build deployment payload (Jira integration)
-        id: build_payload
-        run: |
-          ISSUE_KEY='${{ github.event.inputs.issue_key }}'
-          TEST_ONLY='${{ github.event.inputs.test_only }}'
-          # Build a minimal JSON payload for Jira. Include issueKeys when provided
-          if [ -n "$ISSUE_KEY" ]; then
-            if [ "$TEST_ONLY" = 'true' ]; then
-              PAYLOAD=$(printf '{"issueKeys":["%s"],"testOnly":true}' "$ISSUE_KEY")
-            else
-              PAYLOAD=$(printf '{"issueKeys":["%s"]}' "$ISSUE_KEY")
-            fi
-          else
-            if [ "$TEST_ONLY" = 'true' ]; then
-              PAYLOAD='{"testOnly":true}'
-            else
-              PAYLOAD='{}'
-            fi
-          fi
-          echo "DEPLOY_PAYLOAD=$PAYLOAD" >> $GITHUB_ENV
-
-      - name: Resolve environment value
-        run: |
-          if [ -n "${{ github.event.inputs.environment }}" ]; then
-            echo "ENVIRONMENT=${{ github.event.inputs.environment }}" >> $GITHUB_ENV
-          else
-            echo "ENVIRONMENT=production" >> $GITHUB_ENV
-          fi
-
-      - name: Optionally delete previous deployments
-        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.delete_previous == 'true' }}
-        env:
-          TOKEN: ${{ secrets.GITHUB_DEPLOY_TOKEN || github.token }}
-          OWNER: ${{ github.repository_owner }}
-          REPO: ${{ github.repository }}
-        run: |
-          echo "Deleting all deployments for $OWNER/$REPO"
-          sudo apt-get update -y && sudo apt-get install -y jq
-          DEP_IDS=$(curl -s -H "Authorization: token $TOKEN" "https://api.github.com/repos/$OWNER/$REPO/deployments" | jq -r '.[].id')
-          if [ -z "$DEP_IDS" ]; then
-            echo "No deployments to delete"
-            exit 0
-          fi
-          for id in $DEP_IDS; do
-            echo "Deleting deployment $id"
-            curl -s -X DELETE -H "Authorization: token $TOKEN" "https://api.github.com/repos/$OWNER/$REPO/deployments/$id"
-          done
-
       - name: Create GitHub deployment
-        id: create_deployment
         uses: chrnorm/deployment-action@v2
+        id: deployment
         with:
-          # If you want these deployment events to be able to trigger other workflows,
-          # create a PAT with `repo` and `workflow` permissions and add it as the
-          # repository secret `GITHUB_DEPLOY_TOKEN`. Otherwise the workflow will use
-          # the default `GITHUB_TOKEN` (note: events created by GITHUB_TOKEN cannot
-          # always trigger other workflows).
-          token: ${{ secrets.GITHUB_DEPLOY_TOKEN || github.token }}
-          owner: ${{ github.repository_owner }}
-          repo: ${{ github.repository }}
-          environment: ${{ env.ENVIRONMENT }}
-          environment-url: ${{ github.event.inputs.environment_url }}
-          description: "Test deployment for Jira Cloud integration"
-          payload: ${{ env.DEPLOY_PAYLOAD }}
+          token: ${{ github.token }}
+          environment: ${{ github.event.inputs.environment || 'production' }}
+          environment-url: 'https://example.com'
 
-      - name: Deployment placeholder (test-only)
+      - name: Deploy (test-only, marks success immediately)
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.test_only == 'true' }}
         run: |
-          echo "This workflow only creates deployment events for testing Jira integration."
-          echo "Payload: ${{ env.DEPLOY_PAYLOAD }}"
+          echo "Test-only mode: marking deployment as successful without running actual deployment"
 
-      - name: Mark deployment success
+      - name: Deploy files to remote server via rsync
+        if: ${{ ! (github.event_name == 'workflow_dispatch' && github.event.inputs.test_only == 'true') }}
+        env:
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          TARGET_DIR: ${{ secrets.TARGET_DIR }}
+        run: |
+          set -e
+          echo "Deploying to ${SSH_USER}@${SSH_HOST}:${TARGET_DIR}"
+          # Uncomment when you have SSH secrets configured:
+          # rsync -avz --delete --exclude '.git' ./ "${SSH_USER}@${SSH_HOST}:${TARGET_DIR}"
+
+      - name: Update deployment status (success)
         if: success()
         uses: chrnorm/deployment-status@v2
         with:
-          token: ${{ secrets.GITHUB_DEPLOY_TOKEN || github.token }}
-          owner: ${{ github.repository_owner }}
-          repo: ${{ github.repository }}
-          deployment-id: ${{ steps.create_deployment.outputs.deployment_id }}
-          environment-url: ${{ steps.create_deployment.outputs.environment_url }}
-          state: 'success'
+          token: ${{ github.token }}
+          deployment-id: ${{ steps.deployment.outputs.deployment_id }}
+          state: success
+          environment-url: 'https://example.com'
 
-      - name: Mark deployment failure (fallback)
+      - name: Update deployment status (failure)
         if: failure()
         uses: chrnorm/deployment-status@v2
         with:
-          token: ${{ secrets.GITHUB_DEPLOY_TOKEN || github.token }}
-          owner: ${{ github.repository_owner }}
-          repo: ${{ github.repository }}
-          deployment-id: ${{ steps.create_deployment.outputs.deployment_id }}
-          environment-url: ${{ steps.create_deployment.outputs.environment_url }}
-          state: 'failure'
-
-# Notes:
-# - This workflow creates and updates GitHub Deployment objects only; it does not
-#   perform a real server deployment by default. It is intended to generate the
-#   events Jira Cloud reads in the Deployments panel.
-# - To allow the created deployment events to trigger other workflows or external
-#   services, provide a personal access token in `GITHUB_DEPLOY_TOKEN` with the
-#   appropriate scopes and repository access.
-
-
-# Notes:
-# - This workflow creates a GitHub Deployment using `chrnorm/deployment-action@v2` and updates
-#   the deployment status with `chrnorm/deployment-status@v2`.
-# - If you need deployment events to trigger other workflows, create a personal access token
-#   with `repo` and `workflow` permissions and store it as the secret `GITHUB_DEPLOY_TOKEN`, then
-#   replace `github.token` with `secrets.GITHUB_DEPLOY_TOKEN` in the `token` inputs above.
-# - This workflow is manual (`workflow_dispatch`) and will create a GitHub Deployment then immediately
-#   mark it `success`. If you want deployment events to trigger other workflows, create a personal
-#   access token with appropriate permissions and store it as `GITHUB_DEPLOY_TOKEN`, then replace
-#   `github.token` with `secrets.GITHUB_DEPLOY_TOKEN` in the `token` inputs above.
+          token: ${{ github.token }}
+          deployment-id: ${{ steps.deployment.outputs.deployment_id }}
+          state: failure
+          environment-url: 'https://example.com'
