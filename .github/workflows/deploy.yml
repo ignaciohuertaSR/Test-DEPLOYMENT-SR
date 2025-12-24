@@ -1,14 +1,16 @@
-name: Quick Deploy (force success)
+
+
+name: Deployment (chrnorm/deployment-action)
 
 on:
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Deployment environment'
+        description: 'Deployment environment (overrides default)'
         required: false
         default: 'production'
       issue_key:
-        description: 'Optional Jira issue key (e.g. PROJ-123)'
+        description: 'Optional Jira issue key to associate (e.g. PROJ-123)'
         required: false
       environment_url:
         description: 'URL for the deployed environment'
@@ -16,54 +18,25 @@ on:
         default: 'https://example.com'
 
 jobs:
-  build:
-    name: Build (simulated, always success)
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Run project build (if present)
-        run: |
-          set -e
-          echo "Checking for common build files..."
-          if [ -f package.json ]; then
-            echo "Detected Node project. Installing dependencies and running tests (errors ignored)."
-            if command -v npm >/dev/null 2>&1; then
-              npm ci || true
-              npm test || true
-            else
-              echo "npm not found; skipping Node build steps"
-            fi
-          elif [ -f pom.xml ]; then
-            echo "Detected Maven project. Running mvn - errors ignored."
-            mvn -q -DskipTests=false test || true
-          else
-            echo "No recognised build file found; running a noop build."
-          fi
-          echo "Build finished (forced success)."
-
   deploy:
-    name: Create deployment and mark success
-    needs: build
+    name: Create and run deployment
     runs-on: ubuntu-latest
 
     permissions:
       deployments: write
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Build payload
+      - name: Build deployment payload (Jira integration)
         id: build_payload
         run: |
           ISSUE_KEY='${{ github.event.inputs.issue_key }}'
           if [ -n "$ISSUE_KEY" ]; then
-            PAYLOAD=$(printf '{"issueKeys":["%s"],"build":"success"}' "$ISSUE_KEY")
+            PAYLOAD=$(printf '{"issueKeys":["%s"]}' "$ISSUE_KEY")
           else
-            PAYLOAD='{"build":"success"}'
+            PAYLOAD='{}'
           fi
           echo "DEPLOY_PAYLOAD=$PAYLOAD" >> $GITHUB_ENV
 
@@ -74,17 +47,15 @@ jobs:
           token: ${{ github.token }}
           environment: ${{ github.event.inputs.environment }}
           environment-url: ${{ github.event.inputs.environment_url }}
-          description: "Manual quick deploy (force success)"
+          description: "Deploy triggered by GitHub Actions"
           payload: ${{ env.DEPLOY_PAYLOAD }}
 
-      - name: No remote deploy (skip SSH/SCP)
+      - name: Deploy my app (placeholder)
         run: |
-          echo "No remote SSH/SCP deployment requested. Skipping remote transfer."
-          echo "Deployment payload:" 
-          echo "${{ env.DEPLOY_PAYLOAD }}"
+          echo "Add your deployment commands here (this is a placeholder)."
 
-      - name: Mark deployment success (always)
-        if: always() && steps.deployment.outputs.deployment_id != ''
+      - name: Update deployment status (success)
+        if: success()
         uses: chrnorm/deployment-status@v2
         with:
           token: ${{ github.token }}
@@ -92,12 +63,21 @@ jobs:
           environment-url: ${{ steps.deployment.outputs.environment_url }}
           state: 'success'
 
-      - name: Fallback success message
-        if: always() && steps.deployment.outputs.deployment_id == ''
-        run: |
-          echo "No deployment id returned; nothing to mark. Exiting with success as requested."
+      - name: Update deployment status (failure)
+        if: failure()
+        uses: chrnorm/deployment-status@v2
+        with:
+          token: ${{ github.token }}
+          deployment-id: ${{ steps.deployment.outputs.deployment_id }}
+          environment-url: ${{ steps.deployment.outputs.environment_url }}
+          state: 'failure'
 
 # Notes:
+# - This workflow creates a GitHub Deployment using `chrnorm/deployment-action@v2` and updates
+#   the deployment status with `chrnorm/deployment-status@v2`.
+# - If you need deployment events to trigger other workflows, create a personal access token
+#   with `repo` and `workflow` permissions and store it as the secret `GITHUB_DEPLOY_TOKEN`, then
+#   replace `github.token` with `secrets.GITHUB_DEPLOY_TOKEN` in the `token` inputs above.
 # - This workflow is manual (`workflow_dispatch`) and will create a GitHub Deployment then immediately
 #   mark it `success`. If you want deployment events to trigger other workflows, create a personal
 #   access token with appropriate permissions and store it as `GITHUB_DEPLOY_TOKEN`, then replace
