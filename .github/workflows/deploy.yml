@@ -1,11 +1,9 @@
-
-
 name: Deployment (chrnorm/deployment-action)
 
-permissions:
-  deployments: write
-
+# Triggers: push to main (automated) and manual runs (workflow_dispatch)
 on:
+  push:
+    branches: [ main ]
   workflow_dispatch:
     inputs:
       environment:
@@ -19,67 +17,136 @@ on:
         description: 'URL for the deployed environment'
         required: false
         default: 'https://example.com'
+      test_only:
+        description: 'If true (manual), skip real deploy logic and only create/update deployment events'
+        required: false
+        default: 'true'
+      delete_previous:
+        description: 'If true (manual), delete existing deployments before creating a new one'
+        required: false
+        default: 'false'
+
+# Permissions required to create/update Deployments
+permissions:
+  deployments: write
 
 jobs:
   deploy:
-    name: Create and run deployment
+    name: Create test deployment for Jira
     runs-on: ubuntu-latest
-
-    permissions:
-      deployments: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Print debug info
+        # Helps diagnose 'repo not found' errors during runs
+        run: |
+          echo "github.event_name=$GITHUB_EVENT_NAME"
+          echo "repository=${{ github.repository }}"
+          echo "repository_owner=${{ github.repository_owner }}"
+          echo "actor=${{ github.actor }}"
+
       - name: Build deployment payload (Jira integration)
         id: build_payload
         run: |
           ISSUE_KEY='${{ github.event.inputs.issue_key }}'
+          TEST_ONLY='${{ github.event.inputs.test_only }}'
+          # Build a minimal JSON payload for Jira. Include issueKeys when provided
           if [ -n "$ISSUE_KEY" ]; then
-            PAYLOAD=$(printf '{"issueKeys":["%s"]}' "$ISSUE_KEY")
+            if [ "$TEST_ONLY" = 'true' ]; then
+              PAYLOAD=$(printf '{"issueKeys":["%s"],"testOnly":true}' "$ISSUE_KEY")
+            else
+              PAYLOAD=$(printf '{"issueKeys":["%s"]}' "$ISSUE_KEY")
+            fi
           else
-            PAYLOAD='{}'
+            if [ "$TEST_ONLY" = 'true' ]; then
+              PAYLOAD='{"testOnly":true}'
+            else
+              PAYLOAD='{}'
+            fi
           fi
           echo "DEPLOY_PAYLOAD=$PAYLOAD" >> $GITHUB_ENV
 
+      - name: Resolve environment value
+        run: |
+          if [ -n "${{ github.event.inputs.environment }}" ]; then
+            echo "ENVIRONMENT=${{ github.event.inputs.environment }}" >> $GITHUB_ENV
+          else
+            echo "ENVIRONMENT=production" >> $GITHUB_ENV
+          fi
+
+      - name: Optionally delete previous deployments
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.delete_previous == 'true' }}
+        env:
+          TOKEN: ${{ secrets.GITHUB_DEPLOY_TOKEN || github.token }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "Deleting all deployments for $OWNER/$REPO"
+          sudo apt-get update -y && sudo apt-get install -y jq
+          DEP_IDS=$(curl -s -H "Authorization: token $TOKEN" "https://api.github.com/repos/$OWNER/$REPO/deployments" | jq -r '.[].id')
+          if [ -z "$DEP_IDS" ]; then
+            echo "No deployments to delete"
+            exit 0
+          fi
+          for id in $DEP_IDS; do
+            echo "Deleting deployment $id"
+            curl -s -X DELETE -H "Authorization: token $TOKEN" "https://api.github.com/repos/$OWNER/$REPO/deployments/$id"
+          done
+
       - name: Create GitHub deployment
-        id: deployment
+        id: create_deployment
         uses: chrnorm/deployment-action@v2
         with:
+          # If you want these deployment events to be able to trigger other workflows,
+          # create a PAT with `repo` and `workflow` permissions and add it as the
+          # repository secret `GITHUB_DEPLOY_TOKEN`. Otherwise the workflow will use
+          # the default `GITHUB_TOKEN` (note: events created by GITHUB_TOKEN cannot
+          # always trigger other workflows).
           token: ${{ secrets.GITHUB_DEPLOY_TOKEN || github.token }}
           owner: ${{ github.repository_owner }}
           repo: ${{ github.repository }}
-          environment: ${{ github.event.inputs.environment }}
+          environment: ${{ env.ENVIRONMENT }}
           environment-url: ${{ github.event.inputs.environment_url }}
-          description: "Deploy triggered by GitHub Actions"
+          description: "Test deployment for Jira Cloud integration"
           payload: ${{ env.DEPLOY_PAYLOAD }}
 
-      - name: Deploy my app (placeholder)
+      - name: Deployment placeholder (test-only)
         run: |
-          echo "Add your deployment commands here (this is a placeholder)."
+          echo "This workflow only creates deployment events for testing Jira integration."
+          echo "Payload: ${{ env.DEPLOY_PAYLOAD }}"
 
-      - name: Update deployment status (success)
+      - name: Mark deployment success
         if: success()
         uses: chrnorm/deployment-status@v2
         with:
           token: ${{ secrets.GITHUB_DEPLOY_TOKEN || github.token }}
           owner: ${{ github.repository_owner }}
           repo: ${{ github.repository }}
-          deployment-id: ${{ steps.deployment.outputs.deployment_id }}
-          environment-url: ${{ steps.deployment.outputs.environment_url }}
+          deployment-id: ${{ steps.create_deployment.outputs.deployment_id }}
+          environment-url: ${{ steps.create_deployment.outputs.environment_url }}
           state: 'success'
 
-      - name: Update deployment status (failure)
+      - name: Mark deployment failure (fallback)
         if: failure()
         uses: chrnorm/deployment-status@v2
         with:
           token: ${{ secrets.GITHUB_DEPLOY_TOKEN || github.token }}
           owner: ${{ github.repository_owner }}
           repo: ${{ github.repository }}
-          deployment-id: ${{ steps.deployment.outputs.deployment_id }}
-          environment-url: ${{ steps.deployment.outputs.environment_url }}
+          deployment-id: ${{ steps.create_deployment.outputs.deployment_id }}
+          environment-url: ${{ steps.create_deployment.outputs.environment_url }}
           state: 'failure'
+
+# Notes:
+# - This workflow creates and updates GitHub Deployment objects only; it does not
+#   perform a real server deployment by default. It is intended to generate the
+#   events Jira Cloud reads in the Deployments panel.
+# - To allow the created deployment events to trigger other workflows or external
+#   services, provide a personal access token in `GITHUB_DEPLOY_TOKEN` with the
+#   appropriate scopes and repository access.
+
 
 # Notes:
 # - This workflow creates a GitHub Deployment using `chrnorm/deployment-action@v2` and updates
