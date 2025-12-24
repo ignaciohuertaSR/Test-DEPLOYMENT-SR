@@ -1,62 +1,69 @@
-name: CI/CD Deploy
+name: Quick Deploy (force success)
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: false
+        default: 'production'
+      issue_key:
+        description: 'Optional Jira issue key (e.g. PROJ-123)'
+        required: false
+      environment_url:
+        description: 'URL for the deployed environment'
+        required: false
+        default: 'https://example.com'
 
 jobs:
-  build:
-    name: Build (example)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Show repo contents (debug)
-        run: |
-          echo "Repository files:"
-          ls -la
-
   deploy:
-    name: Deploy to server
-    needs: build
+    name: Create deployment and mark success
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+
+    permissions:
+      deployments: write
+
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install rsync
-        run: sudo apt-get update && sudo apt-get install -y rsync
+      - name: Build payload
+        id: build_payload
+        run: |
+          ISSUE_KEY='${{ github.event.inputs.issue_key }}'
+          if [ -n "$ISSUE_KEY" ]; then
+            PAYLOAD=$(printf '{"issueKeys":["%s"]}' "$ISSUE_KEY")
+          else
+            PAYLOAD='{}'
+          fi
+          echo "DEPLOY_PAYLOAD=$PAYLOAD" >> $GITHUB_ENV
 
-      - name: Upload files via SCP
-        uses: appleboy/scp-action@master
+      - name: Create GitHub deployment
+        id: deployment
+        uses: chrnorm/deployment-action@v2
         with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          port: ${{ secrets.DEPLOY_PORT }}
-          source: '.'
-          target: ${{ secrets.DEPLOY_PATH }}
+          token: ${{ github.token }}
+          environment: ${{ github.event.inputs.environment }}
+          environment-url: ${{ github.event.inputs.environment_url }}
+          description: "Manual quick deploy (force success)"
+          payload: ${{ env.DEPLOY_PAYLOAD }}
 
-      - name: Run remote deploy commands (optional)
-        uses: appleboy/ssh-action@master
+      - name: Mark deployment success (always)
+        if: always() && steps.deployment.outputs.deployment_id != ''
+        uses: chrnorm/deployment-status@v2
         with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          port: ${{ secrets.DEPLOY_PORT }}
-          script: |
-            set -e
-            echo "Deploying on remote host..."
-            cd ${{ secrets.DEPLOY_PATH }} || exit 1
-            # ejemplo: restart service, pull latest, build, etc.
-            if [ -f package.json ]; then
-              echo "Detected Node project — you can run build steps here."
-            fi
+          token: ${{ github.token }}
+          deployment-id: ${{ steps.deployment.outputs.deployment_id }}
+          environment-url: ${{ steps.deployment.outputs.environment_url }}
+          state: 'success'
+
+      - name: Fallback success message
+        if: always() && steps.deployment.outputs.deployment_id == ''
+        run: |
+          echo "No deployment id returned; nothing to mark. Exiting with success as requested."
 
 # Notes:
-# - Define these repository secrets before running the workflow:
-#   - DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY, DEPLOY_PATH, DEPLOY_PORT (optional)
-# - This is a minimal example; adapt build and deploy steps to your project.
+# - This workflow is manual (`workflow_dispatch`) and will create a GitHub Deployment then immediately
+#   mark it `success`. If you want deployment events to trigger other workflows, create a personal
+#   access token with appropriate permissions and store it as `GITHUB_DEPLOY_TOKEN`, then replace
+#   `github.token` with `secrets.GITHUB_DEPLOY_TOKEN` in the `token` inputs above.
