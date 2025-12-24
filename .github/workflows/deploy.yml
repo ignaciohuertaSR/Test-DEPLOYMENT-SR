@@ -2,6 +2,9 @@
 
 name: Deployment (chrnorm/deployment-action)
 
+permissions:
+  deployments: write
+
 on:
   workflow_dispatch:
     inputs:
@@ -44,7 +47,9 @@ jobs:
         id: deployment
         uses: chrnorm/deployment-action@v2
         with:
-          token: ${{ github.token }}
+          token: ${{ secrets.GITHUB_DEPLOY_TOKEN || github.token }}
+          owner: ${{ github.repository_owner }}
+          repo: ${{ github.repository }}
           environment: ${{ github.event.inputs.environment }}
           environment-url: ${{ github.event.inputs.environment_url }}
           description: "Deploy triggered by GitHub Actions"
@@ -58,7 +63,9 @@ jobs:
         if: success()
         uses: chrnorm/deployment-status@v2
         with:
-          token: ${{ github.token }}
+          token: ${{ secrets.GITHUB_DEPLOY_TOKEN || github.token }}
+          owner: ${{ github.repository_owner }}
+          repo: ${{ github.repository }}
           deployment-id: ${{ steps.deployment.outputs.deployment_id }}
           environment-url: ${{ steps.deployment.outputs.environment_url }}
           state: 'success'
@@ -67,7 +74,9 @@ jobs:
         if: failure()
         uses: chrnorm/deployment-status@v2
         with:
-          token: ${{ github.token }}
+          token: ${{ secrets.GITHUB_DEPLOY_TOKEN || github.token }}
+          owner: ${{ github.repository_owner }}
+          repo: ${{ github.repository }}
           deployment-id: ${{ steps.deployment.outputs.deployment_id }}
           environment-url: ${{ steps.deployment.outputs.environment_url }}
           state: 'failure'
