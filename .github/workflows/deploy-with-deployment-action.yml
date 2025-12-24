@@ -1,0 +1,81 @@
+name: Deployment (chrnorm/deployment-action)
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment (overrides default)'
+        required: false
+        default: 'production'
+      issue_key:
+        description: 'Optional Jira issue key to associate (e.g. PROJ-123)'
+        required: false
+      environment_url:
+        description: 'URL for the deployed environment'
+        required: false
+        default: 'https://example.com'
+
+jobs:
+  deploy:
+    name: Create and run deployment
+    runs-on: ubuntu-latest
+
+    permissions:
+      deployments: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build deployment payload (Jira integration)
+        id: build_payload
+        run: |
+          PAYLOAD='{}'
+          if [ -n "${{ github.event.inputs.issue_key }}" ]; then
+            PAYLOAD=$(printf '{"issueKeys":["%s"]}' "${{ github.event.inputs.issue_key }}")
+          fi
+          echo "DEPLOY_PAYLOAD=$PAYLOAD" >> $GITHUB_ENV
+
+      - name: Create GitHub deployment
+        id: deployment
+        uses: chrnorm/deployment-action@v2
+        with:
+          token: ${{ secrets.GITHUB_DEPLOY_TOKEN }}
+          environment: ${{ github.event.inputs.environment }}
+          environment-url: ${{ github.event.inputs.environment_url }}
+          description: "Deploy triggered by GitHub Actions"
+          payload: ${{ env.DEPLOY_PAYLOAD }}
+
+      - name: Deploy application to server (SCP)
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT }}
+          source: '.'
+          target: ${{ secrets.DEPLOY_PATH }}
+
+      - name: Update deployment status (success)
+        if: success()
+        uses: chrnorm/deployment-status@v2
+        with:
+          token: ${{ secrets.GITHUB_DEPLOY_TOKEN }}
+          deployment-id: ${{ steps.deployment.outputs.deployment_id }}
+          environment-url: ${{ steps.deployment.outputs.environment_url }}
+          state: 'success'
+
+      - name: Update deployment status (failure)
+        if: failure()
+        uses: chrnorm/deployment-status@v2
+        with:
+          token: ${{ secrets.GITHUB_DEPLOY_TOKEN }}
+          deployment-id: ${{ steps.deployment.outputs.deployment_id }}
+          environment-url: ${{ steps.deployment.outputs.environment_url }}
+          state: 'failure'
+
+# Notes:
+# - Create a repository secret `GITHUB_DEPLOY_TOKEN` (personal access token) with repo and workflow permissions
+#   if you want deployment events to trigger other workflows; otherwise `github.token` can be used but has limitations.
+# - Required secrets for the SCP step: `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `DEPLOY_PATH`, `DEPLOY_PORT` (optional).
+# - Adjust `environment`, `environment-url`, and the deploy step to match your project's needs.
